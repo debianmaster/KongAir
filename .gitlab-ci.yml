@@ -1,0 +1,297 @@
+# GitLab CI/CD Pipeline for KongAir
+# Based on existing GitHub Actions workflows
+
+stages:
+  - build
+  - kong-config
+  - stage
+  - deploy
+
+variables:
+  DOCKER_REGISTRY: "registry.gitlab.com"
+  DOCKER_IMAGE_PREFIX: "kongair"
+  DOCKER_DRIVER_OPTS: "--driver-opt network=host"
+  DOCKER_TLS_CERT_DIR: "/certs"
+
+# Cache Docker layers between jobs
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cache/docker
+
+# Build Docker Images
+build-docker:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERT_DIR: "/certs"
+    DOCKER_TLS_VERIFY: 1
+    DOCKER_CERT_PATH: "$CI_PROJECT_DIR/.certs"
+  before_script:
+    - apk add --no-cache git
+    - docker info
+  script:
+    - |
+      # Build matrix for all services
+      SERVICES=(
+        "flight-data:flights"
+        "flight-data:routes"
+        "sales:bookings"
+        "sales:customer"
+        ".:experience"
+      )
+      
+      for service in "${SERVICES[@]}"; do
+        IFS=':' read -r dir name <<< "$service"
+        
+        echo "Building $name from $dir"
+        
+        # Build context path
+        if [ "$dir" = "." ]; then
+          context_path="$name"
+        else
+          context_path="$dir/$name"
+        fi
+        
+        # Build and push image
+        docker build \
+          --platform linux/amd64,linux/arm64 \
+          --tag "$DOCKER_REGISTRY/$CI_PROJECT_PATH/$DOCKER_IMAGE_PREFIX-$name:latest" \
+          --tag "$DOCKER_REGISTRY/$CI_PROJECT_PATH/$DOCKER_IMAGE_PREFIX-$name:$CI_COMMIT_SHORT_SHA" \
+          "$context_path"
+        
+        # Push to registry
+        docker push "$DOCKER_REGISTRY/$CI_PROJECT_PATH/$DOCKER_IMAGE_PREFIX-$name:latest"
+        docker push "$DOCKER_REGISTRY/$CI_PROJECT_PATH/$DOCKER_IMAGE_PREFIX-$name:$CI_COMMIT_SHORT_SHA"
+      done
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "flight-data/**"
+        - "sales/**"
+        - "experience/**"
+        - "!PRD/**"
+        - "!platform/kong/.generated/kong.yaml"
+  tags:
+    - docker
+
+# Check for Kong-related changes
+check-kong-changes:
+  stage: kong-config
+  image: alpine:latest
+  script:
+    - apk add --no-cache git
+    - |
+      # Check if Kong-related files have changed
+      CHANGED_FILES=$(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA)
+      
+      KONG_FILES=(
+        ".gitlab-ci.yml"
+        "flight-data/flights/openapi.yaml"
+        "flight-data/flights/kong/**"
+        "flight-data/routes/openapi.yaml"
+        "flight-data/routes/kong/**"
+        "sales/bookings/openapi.yaml"
+        "sales/bookings/kong/**"
+        "sales/customer/openapi.yaml"
+        "sales/customer/kong/**"
+        "experience/kong/**"
+        "platform/kong/**"
+      )
+      
+      HAS_CHANGES=false
+      for pattern in "${KONG_FILES[@]}"; do
+        if echo "$CHANGED_FILES" | grep -q "$pattern"; then
+          HAS_CHANGES=true
+          break
+        fi
+      done
+      
+      if [ "$HAS_CHANGES" = true ]; then
+        echo "Kong-related changes detected"
+        echo "has_changes=true" >> $GITLAB_ENV
+      else
+        echo "No Kong-related changes detected"
+        echo "has_changes=false" >> $GITLAB_ENV
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^workflow\//
+      changes:
+        - ".gitlab-ci.yml"
+        - "flight-data/**"
+        - "sales/**"
+        - "experience/**"
+        - "platform/kong/**"
+        - "!PRD/**"
+        - "!platform/kong/.generated/kong.yaml"
+  tags:
+    - docker
+
+# Convert OpenAPI to Kong configurations
+convert-oas-to-kong:
+  stage: kong-config
+  image: kong/deck:1.26.0
+  needs:
+    - check-kong-changes
+  script:
+    - |
+      # Create artifacts directory
+      mkdir -p .gitlab/artifacts/kong
+      
+      # Convert Flights API to Kong
+      deck file openapi2kong -s flight-data/flights/openapi.yaml | \
+        deck file patch flight-data/flights/kong/patches.yaml | \
+        deck file add-tags -o .gitlab/artifacts/kong/flight-data-flights-kong.yaml \
+          --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
+      
+      # Convert Routes API to Kong
+      deck file openapi2kong -s flight-data/routes/openapi.yaml | \
+        deck file patch flight-data/routes/kong/patches.yaml | \
+        deck file add-tags -o .gitlab/artifacts/kong/flight-data-routes-kong.yaml \
+          --selector "$.services[*]" --selector "$.services[*].routes[*]" flight-data
+      
+      # Convert Bookings API to Kong
+      deck file openapi2kong -s sales/bookings/openapi.yaml | \
+        deck file patch sales/bookings/kong/patches.yaml | \
+        deck file add-tags -o .gitlab/artifacts/kong/sales-bookings-kong.yaml \
+          --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+      
+      # Convert Customers API to Kong
+      deck file openapi2kong -s sales/customer/openapi.yaml | \
+        deck file patch sales/customer/kong/patches.yaml | \
+        deck file add-tags -o .gitlab/artifacts/kong/sales-customer-kong.yaml \
+          --selector "$.services[*]" --selector "$.services[*].routes[*]" sales
+      
+      # Combine Kong Configurations
+      deck file merge \
+        .gitlab/artifacts/kong/*-kong.yaml -o .gitlab/artifacts/kong/kong-combined.yaml
+      
+      # Merge Experience API Configurations
+      deck file merge \
+        .gitlab/artifacts/kong/kong-combined.yaml experience/kong/experience-service.yaml \
+        -o .gitlab/artifacts/kong/kong-combined.yaml
+      
+      # Platform Team Kong Additions
+      deck file merge \
+        .gitlab/artifacts/kong/kong-combined.yaml \
+        platform/kong/platform-kong-base.yaml \
+        platform/kong/consumers/* \
+        platform/kong/plugins/* \
+        platform/kong/vaults/* | \
+      deck file patch \
+        platform/kong/patches.yaml | \
+      deck file add-tags \
+        -o platform/kong/.generated/kong.yaml \
+        "platform-repo-managed"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^workflow\//
+      changes:
+        - ".gitlab-ci.yml"
+        - "flight-data/**"
+        - "sales/**"
+        - "experience/**"
+        - "platform/kong/**"
+        - "!PRD/**"
+        - "!platform/kong/.generated/kong.yaml"
+  artifacts:
+    name: "kong-configurations-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - .gitlab/artifacts/kong/*.yaml
+    expire_in: 1 week
+  tags:
+    - docker
+
+# Stage Kong changes for production
+stage-kong-for-prd:
+  stage: stage
+  image: kong/deck:1.26.0
+  needs:
+    - convert-oas-to-kong
+  script:
+    - |
+      # Stage combined file for PRD
+      cp platform/kong/.generated/kong.yaml PRD/kong/kong.yaml
+      
+      # Create a new branch for PRD staging
+      git config --global user.email "gitlab-ci@example.com"
+      git config --global user.name "GitLab CI"
+      
+      # Check if we need to create a new branch or update existing
+      if git ls-remote --heads origin "PRD/kong" | grep -q "PRD/kong"; then
+        git fetch origin PRD/kong
+        git checkout PRD/kong
+        git pull origin PRD/kong
+      else
+        git checkout -b PRD/kong
+      fi
+      
+      # Add and commit changes
+      git add PRD/kong/kong.yaml
+      git commit -m "Stage Kong Gateway Configuration for PRD - $CI_COMMIT_SHORT_SHA"
+      
+      # Push to PRD branch
+      git push origin PRD/kong
+      
+      echo "Staged Kong configuration to PRD/kong branch"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^workflow\//
+      changes:
+        - "platform/kong/.generated/kong.yaml"
+        - ".gitlab-ci.yml"
+  tags:
+    - docker
+
+# Deploy Kong to production
+deploy-kong-prd:
+  stage: deploy
+  image: kong/deck:1.26.0
+  script:
+    - |
+      # Deploy Kong configuration to production
+      deck sync --select-tag platform-repo-managed \
+        -s PRD/kong/kong.yaml \
+        --konnect-runtime-group-name KongAir-PRD \
+        --konnect-token $KONNECT_PAT
+      
+      echo "Successfully deployed Kong configuration to production"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - "PRD/kong/kong.yaml"
+        - ".gitlab-ci.yml"
+  environment:
+    name: production
+    url: https://kongair.example.com
+  tags:
+    - production
+  only:
+    - main
+
+# Test Kong configuration
+test-kong-config:
+  stage: kong-config
+  image: kong/deck:1.26.0
+  needs:
+    - convert-oas-to-kong
+  script:
+    - |
+      # Validate Kong configuration
+      deck validate -s platform/kong/.generated/kong.yaml
+      
+      # Test configuration with dry-run
+      deck diff --select-tag platform-repo-managed \
+        -s platform/kong/.generated/kong.yaml \
+        --konnect-runtime-group-name KongAir-PRD \
+        --konnect-token $KONNECT_PAT || true
+      
+      echo "Kong configuration validation completed"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^workflow\//
+      changes:
+        - "platform/kong/.generated/kong.yaml"
+        - ".gitlab-ci.yml"
+  tags:
+    - docker

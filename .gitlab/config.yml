@@ -1,0 +1,176 @@
+# GitLab Project Configuration
+# This file contains GitLab-specific project settings
+
+# Merge Request Templates
+merge_request_templates:
+  default: |
+    ## Description
+    Please describe the changes in this merge request.
+    
+    ## Type of Change
+    - [ ] Bug fix
+    - [ ] New feature
+    - [ ] Breaking change
+    - [ ] Documentation update
+    - [ ] CI/CD improvement
+    
+    ## Related Issues
+    Closes #
+    
+    ## Testing
+    - [ ] Unit tests pass
+    - [ ] Integration tests pass
+    - [ ] Manual testing completed
+    
+    ## Checklist
+    - [ ] Code follows project style guidelines
+    - [ ] Self-review completed
+    - [ ] Documentation updated (if applicable)
+    - [ ] No breaking changes introduced
+    
+  kong-config: |
+    ## Kong Configuration Changes
+    This merge request contains changes to Kong Gateway configurations.
+    
+    ### Changes Made
+    - [ ] OpenAPI specification updates
+    - [ ] Kong configuration patches
+    - [ ] Platform-level configuration changes
+    
+    ### Services Affected
+    - [ ] Flights API
+    - [ ] Routes API
+    - [ ] Bookings API
+    - [ ] Customer API
+    - [ ] Experience API
+    - [ ] Platform configurations
+    
+    ### Testing
+    - [ ] Kong configuration validation passed
+    - [ ] Dry-run deployment completed
+    - [ ] Configuration syntax verified
+    
+    ### Deployment Impact
+    - [ ] Staging environment tested
+    - [ ] Production deployment plan reviewed
+    - [ ] Rollback plan documented
+    
+  production-deployment: |
+    ## Production Deployment
+    This merge request will deploy changes to the production environment.
+    
+    ### Deployment Type
+    - [ ] Kong Gateway configuration
+    - [ ] Service updates
+    - [ ] Infrastructure changes
+    
+    ### Risk Assessment
+    - [ ] Low risk - configuration only
+    - [ ] Medium risk - service updates
+    - [ ] High risk - breaking changes
+    
+    ### Rollback Plan
+    Describe the rollback procedure if issues occur:
+    
+    ### Approval Required
+    - [ ] DevOps team approval
+    - [ ] Product owner approval
+    - [ ] Security team approval
+
+# Issue Templates
+issue_templates:
+  bug: |
+    ## Bug Description
+    A clear description of what the bug is.
+    
+    ## Steps to Reproduce
+    1. Go to '...'
+    2. Click on '...'
+    3. See error
+    
+    ## Expected Behavior
+    A clear description of what you expected to happen.
+    
+    ## Actual Behavior
+    A clear description of what actually happened.
+    
+    ## Environment
+    - OS: [e.g., macOS, Linux, Windows]
+    - Browser: [e.g., Chrome, Safari, Firefox]
+    - Version: [e.g., 22]
+    
+    ## Additional Context
+    Add any other context about the problem here.
+    
+  feature: |
+    ## Feature Request
+    A clear description of the feature you'd like to see implemented.
+    
+    ## Problem Statement
+    A clear description of the problem this feature would solve.
+    
+    ## Proposed Solution
+    A clear description of how you envision this feature working.
+    
+    ## Alternative Solutions
+    A clear description of any alternative solutions you've considered.
+    
+    ## Additional Context
+    Add any other context or screenshots about the feature request here.
+
+# GitLab Pages Configuration (if needed)
+pages:
+  enabled: true
+  path: public
+  artifacts:
+    expire_in: 30 days
+
+# Container Registry Settings
+container_registry:
+  enabled: true
+  expiration_policy:
+    enabled: true
+    older_than: 90 days
+    keep_n: 10
+    name_regex: ".*"
+    name_regex_keep: ".*"
+
+# Security and Compliance
+security_and_compliance:
+  security_scanning:
+    enabled: true
+    schedule: "0 2 * * *"  # Daily at 2 AM
+  dependency_scanning:
+    enabled: true
+    schedule: "0 3 * * *"  # Daily at 3 AM
+  container_scanning:
+    enabled: true
+    schedule: "0 4 * * *"  # Daily at 4 AM
+
+# CI/CD Variables (protected and masked)
+ci_cd_variables:
+  required:
+    - KONNECT_PAT
+    - DOCKER_REGISTRY_USERNAME
+    - DOCKER_REGISTRY_PASSWORD
+  protected:
+    - KONNECT_PAT
+    - DOCKER_REGISTRY_USERNAME
+    - DOCKER_REGISTRY_PASSWORD
+  masked:
+    - KONNECT_PAT
+    - DOCKER_REGISTRY_PASSWORD
+
+# Project Access Control
+access_control:
+  protected_branches:
+    - main
+    - PRD/kong
+    - develop
+  protected_tags:
+    - v*
+    - release/*
+  merge_request_approvals:
+    required_approvals: 2
+    reset_on_push: true
+    disable_overriding_approvers_per_merge_request: false
